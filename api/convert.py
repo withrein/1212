@@ -1,8 +1,13 @@
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import xml.etree.ElementTree as ET
 import pandas as pd
 import io
 import base64
 import json
+
+app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 def parse_xml_to_dataframe(xml_content):
     """Parse XML content and convert to pandas DataFrame"""
@@ -107,67 +112,37 @@ def create_pivot_table(df):
     except Exception as e:
         return df, f"Pivot failed: {str(e)}, using original format"
 
-def handler(request, response):
-    """n8n handler function to convert XML to XLSX"""
+@app.route('/api/convert', methods=['POST'])
+def convert_xml_to_xlsx():
+    """API endpoint to convert XML to XLSX"""
     try:
-        # Set CORS headers for browser requests
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'POST, GET, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-        
-        # Handle preflight OPTIONS request
-        if request.method == 'OPTIONS':
-            response.status_code = 200
-            response.body = ''
-            return
-        
-        # Only accept POST requests for conversion
-        if request.method != 'POST':
-            response.status_code = 405
-            response.headers['Content-Type'] = 'application/json'
-            response.body = json.dumps({'error': 'Method not allowed. Use POST.'})
-            return
-        
         # Get XML content from request
         xml_content = None
         
         # Try to get XML from different possible sources
-        if hasattr(request, 'body') and request.body:
-            # If body is already a string (XML content)
-            if isinstance(request.body, str):
-                xml_content = request.body
-            elif isinstance(request.body, bytes):
-                xml_content = request.body.decode('utf-8')
-            else:
-                # Try to parse as JSON in case XML is in a field
-                try:
-                    body_data = json.loads(request.body)
-                    xml_content = body_data.get('xml_content') or body_data.get('xml')
-                except:
-                    xml_content = str(request.body)
-        
-        # Try to get from form data if available
-        if not xml_content and hasattr(request, 'form'):
+        if request.is_json:
+            # JSON request
+            data = request.get_json()
+            xml_content = data.get('xml_content') or data.get('xml')
+        elif request.files and 'xml' in request.files:
+            # File upload
+            xml_file = request.files['xml']
+            xml_content = xml_file.read().decode('utf-8')
+        elif request.form:
+            # Form data
             xml_content = request.form.get('xml_content') or request.form.get('xml')
-        
-        # Try to get from query parameters
-        if not xml_content and hasattr(request, 'args'):
-            xml_content = request.args.get('xml_content') or request.args.get('xml')
+        elif request.data:
+            # Raw data (assume it's XML)
+            xml_content = request.data.decode('utf-8')
         
         if not xml_content:
-            response.status_code = 400
-            response.headers['Content-Type'] = 'application/json'
-            response.body = json.dumps({'error': 'No XML content provided. Send XML data in body, form, or as xml_content parameter.'})
-            return
+            return jsonify({'error': 'No XML content provided. Send XML data in JSON body, form data, or as file upload.'}), 400
         
         # Parse XML to DataFrame
         df, parse_message = parse_xml_to_dataframe(xml_content)
         
         if df is None:
-            response.status_code = 400
-            response.headers['Content-Type'] = 'application/json'
-            response.body = json.dumps({'error': parse_message})
-            return
+            return jsonify({'error': parse_message}), 400
         
         # Try to create pivot table for better presentation
         pivot_df, pivot_message = create_pivot_table(df)
@@ -197,9 +172,7 @@ def handler(request, response):
         excel_base64 = base64.b64encode(excel_data).decode('utf-8')
         
         # Return success response with Excel file
-        response.status_code = 200
-        response.headers['Content-Type'] = 'application/json'
-        response.body = json.dumps({
+        return jsonify({
             'success': True,
             'message': parse_message,
             'processing_notes': pivot_message,
@@ -209,13 +182,37 @@ def handler(request, response):
         })
         
     except Exception as e:
-        response.status_code = 500
-        response.headers['Content-Type'] = 'application/json'
-        response.body = json.dumps({'error': f'Conversion failed: {str(e)}'})
+        return jsonify({'error': f'Conversion failed: {str(e)}'}), 500
 
-# Health check function (optional)
-def health_handler(request, response):
-    """Health check handler for n8n"""
-    response.status_code = 200
-    response.headers['Content-Type'] = 'application/json'
-    response.body = json.dumps({'status': 'healthy', 'message': 'XML to XLSX converter is running'})
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({'status': 'healthy', 'message': 'XML to XLSX converter API is running'})
+
+@app.route('/', methods=['GET'])
+def home():
+    """Home endpoint with API documentation"""
+    return jsonify({
+        'service': 'XML to XLSX Converter API',
+        'version': '1.0.0',
+        'endpoints': {
+            'POST /api/convert': 'Convert XML to XLSX format',
+            'GET /api/health': 'Health check endpoint',
+            'GET /': 'This documentation'
+        },
+        'usage': {
+            'endpoint': '/api/convert',
+            'method': 'POST',
+            'content_types': [
+                'application/json with xml_content field',
+                'multipart/form-data with xml file or xml_content field',
+                'text/xml or application/xml (raw XML data)'
+            ],
+            'response': 'JSON with base64 encoded Excel file'
+        }
+    })
+
+if __name__ == '__main__':
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
